@@ -36,6 +36,13 @@ class ServiceRequest(models.Model):
     custom_contact_number = models.CharField(max_length=50, blank=True, null=True)
     attachment = models.ImageField(upload_to='request_attachments/', blank=True, null=True)
 
+
+    # Request categories chosen by the requestor
+    labor = models.BooleanField(default=False)
+    materials_needed = models.BooleanField(default=False)
+    others_needed = models.BooleanField(default=False)
+
+    
     # 🚨 Emergency flag
     is_emergency = models.BooleanField(default=False)
 

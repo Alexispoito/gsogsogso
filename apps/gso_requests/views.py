@@ -369,6 +369,10 @@ def personnel_task_management(request):
 
 @login_required
 def personnel_task_detail(request, pk):
+    from apps.gso_reports.models import SuccessIndicator
+    from apps.gso_inventory.models import InventoryItem
+    from django.db import transaction
+
     task = get_object_or_404(ServiceRequest, pk=pk, assigned_personnel=request.user)
     materials = task.requestmaterial_set.select_related("material")
     reports = task.reports.select_related("personnel").order_by("-created_at")
@@ -385,10 +389,17 @@ def personnel_task_detail(request, pk):
 
     if request.method == "POST":
         # Start Task
-        if "start" in request.POST and task.status == "Approved":
-            task.status = "In Progress"
+        if "start" in request.POST and (task.status == "Approved" or task.is_emergency):
+            task.status = "In Progress"  # Workflow stays consistent
             task.started_at = timezone.now()
+
+            # Optional: Add an emergency note
+            if task.is_emergency:
+                task.emergency_started = True  # <-- if you want a separate flag
+                # Or just rely on `is_emergency` in the template
+
             task.save()
+
 
         # Mark Done
         elif "done" in request.POST and task.status == "In Progress":
@@ -550,6 +561,11 @@ def requestor_request_management(request):
 @user_passes_test(is_requestor)
 def add_request(request):
     if request.method == "POST":
+
+        labor = request.POST.get("labor") == "1"
+        materials = request.POST.get("materials") == "1"
+        others = request.POST.get("others") == "1"
+
         ServiceRequest.objects.create(
             requestor=request.user,
             unit_id=request.POST.get("unit"),
@@ -560,7 +576,13 @@ def add_request(request):
             custom_email=request.POST.get("custom_email") or "",
             custom_contact_number=request.POST.get("custom_contact_number") or "",
             attachment=request.FILES.get("attachment"),
+
+            # NEW FIELDS
+            labor=labor,
+            materials_needed=materials,
+            others_needed=others,
         )
+
         return redirect("gso_requests:requestor_request_management")
     
 

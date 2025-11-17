@@ -5,6 +5,7 @@ import json
 import calendar
 import openpyxl
 from datetime import datetime
+from django.utils import timezone
 from django.conf import settings
 from django.http import HttpResponse, JsonResponse
 from django.db.models import Q
@@ -12,7 +13,7 @@ from django.shortcuts import render
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.views.decorators.csrf import csrf_exempt
 from openpyxl import load_workbook
-from openpyxl.styles import Alignment
+from openpyxl.styles import Alignment, Border, Side, Font
 from openpyxl.utils import range_boundaries
 
 
@@ -170,6 +171,7 @@ def generate_ipmt(request):
 
         personnel_list = [p.strip() for p in personnel_param.split(",") if p.strip()]
 
+        # Clean indicators
         for r in reports:
             if not r.get("indicator"):
                 continue
@@ -185,17 +187,19 @@ def generate_ipmt(request):
     wb = openpyxl.load_workbook(template_path)
     ws = wb.active
 
-    personnel_fullnames = []
-    for identifier in personnel_list:
-        user_obj = get_user_by_identifier(identifier)
-        if user_obj:
-            full_name = (user_obj.get_full_name() or "").strip()
-            personnel_fullnames.append(full_name or user_obj.username)
-        else:
-            personnel_fullnames.append(identifier)
+    # Only support single personnel for header fields
+    if personnel_list:
+        user_obj = get_user_by_identifier(personnel_list[0])
+    else:
+        user_obj = None
 
-    ws["B8"] = ", ".join(personnel_fullnames) if personnel_fullnames else "No personnel found"
+    # --- Header Section ---
+    ws["B7"] = user_obj.unit.name if user_obj and user_obj.unit else "No Unit"
+    ws["B8"] = user_obj.get_full_name() if user_obj else "No Name"
+    ws["B9"] = user_obj.employment_status.employment_status if user_obj and user_obj.employment_status else "No Status"
+    ws["B10"] = user_obj.position.name if user_obj and user_obj.position else "No Position"
 
+    # Month
     if "-" in month_filter:
         year, month_num = map(int, month_filter.split("-"))
         month_name = f"{calendar.month_name[month_num]} {year}"
@@ -203,42 +207,125 @@ def generate_ipmt(request):
         month_name = month_filter
     ws["B11"] = month_name
 
+    # Define a thin border style
+    thin_border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
+
+    # --- Data Table ---
     start_row = 13
     for i, r in enumerate(reports, start=start_row):
-
-        # --- CLEAN INDICATOR STRING ---
+        # Clean indicator string
         indicator_raw = r.get("indicator", "")
-
-        # Remove ANY line breaks, tabs, multiple spaces
         indicator_raw = " ".join(indicator_raw.split())
-
-        # If it has " - ", clean parts separately
         if " - " in indicator_raw:
             code, desc = indicator_raw.split(" - ", 1)
             code = code.strip()
-            desc = " ".join(desc.split())  # remove all extra spaces/newlines
+            desc = " ".join(desc.split())
             indicator_clean = f"{code} - {desc}"
         else:
             indicator_clean = indicator_raw.strip()
 
-        # CLEAN description
-        desc_clean = r.get("description", "") or ""
-        desc_clean = " ".join(desc_clean.split())
-
-        # CLEAN remarks
-        remarks_clean = r.get("remarks", "") or ""
-        remarks_clean = " ".join(remarks_clean.split())
+        desc_clean = " ".join((r.get("description", "") or "").split())
+        remarks_clean = " ".join((r.get("remarks", "") or "").split())
 
         # Write to Excel
         ws.cell(row=i, column=1).value = indicator_clean
         ws.cell(row=i, column=2).value = desc_clean
         ws.cell(row=i, column=3).value = remarks_clean
 
+        # Merge columns C and D for this row
+        ws.merge_cells(start_row=i, start_column=3, end_row=i, end_column=4)
+
+        # Center alignment for all columns A-D
+        for col in range(1, 5):
+            ws.cell(row=i, column=col).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            ws.cell(row=i, column=col).border = thin_border
+
+    thin_side = Side(border_style="thin", color="000000")
+
+    def outside_border(top=False, left=False, bottom=False, right=False):
+        return Border(
+            top=thin_side if top else None,
+            left=thin_side if left else None,
+            bottom=thin_side if bottom else None,
+            right=thin_side if right else None
+        )
+
+    footer_start = start_row + len(reports)  # after last data row
+
+    # --- IPCR note ---
+    ws.merge_cells(start_row=footer_start, start_column=1, end_row=footer_start, end_column=4)
+    note_cell = ws.cell(row=footer_start, column=1)
+    note_cell.value = ("(*Based on the IPCR Major Final Output (MFO)/ Program, Activity and Project (PAP), "
+                    "select only those success indicators where the accomplishments for the period are aligned to*)")
+    note_cell.font = Font(italic=True)
+    note_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.row_dimensions[footer_start].height = 40
+
+    # Outside border for IPCR note
+    for col in range(1, 5):
+        ws.cell(row=footer_start, column=col).border = outside_border(
+            top=True, left=(col==1), bottom=True, right=(col==4)
+        )
+
+    # --- Prepared by (left box) ---
+    prepared_row_start = footer_start + 1
+    for i, text in enumerate(["Prepared by:", ws["B8"].value if user_obj else "No Name", "Employee"]):
+        row = prepared_row_start + i
+        ws.cell(row=row, column=1).value = text
+        if i == 1:
+            ws.cell(row=row, column=1).font = Font(underline='single')
+        ws.cell(row=row, column=1).alignment = Alignment(horizontal="center", vertical="center")
+        # Left box border: top, left, bottom only, no right
+        ws.cell(row=row, column=1).border = outside_border(
+            top=(i==0),
+            left=True,
+            bottom=(i==2),
+            right=False
+        )
+
+    # Add left border, top/bottom, and bottom across B as well
+    if i == 2:  # last row of box
+        for col in [1, 2]:
+            ws.cell(row=row, column=col).border = outside_border(top=False, left=(col==1), bottom=True, right=False)
+    else:
+        ws.cell(row=row, column=1).border = outside_border(top=(i==0), left=True, bottom=False, right=False)
+
+    # --- Checked and Verified by (right box) ---
+    director = User.objects.filter(role="director").first()
+    checked_texts = [
+        "Checked and Verified by:",
+        director.get_full_name() if director else "Director Name",
+        "(Department Head / Supervisor)"
+    ]
+
+    for i, text in enumerate(checked_texts):
+        row = prepared_row_start + i
+        ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=4)
+        ws.cell(row=row, column=3).value = text
+        if i == 1:
+            ws.cell(row=row, column=3).font = Font(underline='single')
+        ws.cell(row=row, column=3).alignment = Alignment(horizontal="center", vertical="center")
+        # Right box border: top, right, bottom only, no left
+        for col in range(3, 5):
+            ws.cell(row=row, column=col).border = outside_border(
+                top=(i==0),
+                left=False,
+                bottom=(i==2),
+                right=True
+            )
+
+    # --- Save Response ---
     response = HttpResponse(content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     filename = f"IPMT_{unit_filter}_{month_filter}.xlsx"
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
     wb.save(response)
     return response
+
 
 
 # -------------------------------
@@ -477,64 +564,102 @@ def update_war_success_indicator(request, war_id):
 @login_required
 @user_passes_test(is_gso_or_director)
 def feedback_reports(request):
-    """Show and export all feedback records."""
-    feedback_list = Feedback.objects.select_related(
-        "request", "request__requestor", "request__unit"
-    ).order_by("-date_submitted")
+    """Show feedbacks with optional filtering by unit and date range, and export CSV."""
+    
+    feedback_list = Feedback.objects.select_related("request", "request__requestor", "request__unit").order_by("-date_submitted")
+    units = Unit.objects.all()
 
-    # --- FILTERING ---
-    month = request.GET.get("month")
-    unit = request.GET.get("unit")
+    # Get filter parameters from GET
+    unit_id = request.GET.get("unit_id")
+    month = request.GET.get("month")          # format: 'YYYY-MM'
+    start_date = request.GET.get("start_date")
+    end_date = request.GET.get("end_date")
 
+    # Filter by unit
+    if unit_id:
+        feedback_list = feedback_list.filter(request__unit_id=unit_id)
+
+    # Filter by month
     if month:
-        feedback_list = feedback_list.filter(date_submitted__month=month)
-    if unit:
-        feedback_list = feedback_list.filter(request__unit_id=unit)
+        try:
+            year, month_num = map(int, month.split("-"))
+            feedback_list = feedback_list.filter(
+                date_submitted__year=year,
+                date_submitted__month=month_num
+            )
+        except ValueError:
+            pass
 
-    # --- EXPORT CSV ---
+    # Filter by custom date range
+    if start_date:
+        try:
+            start = datetime.strptime(start_date, "%Y-%m-%d")
+            feedback_list = feedback_list.filter(date_submitted__date__gte=start)
+        except ValueError:
+            pass
+
+    if end_date:
+        try:
+            end = datetime.strptime(end_date, "%Y-%m-%d")
+            feedback_list = feedback_list.filter(date_submitted__date__lte=end)
+        except ValueError:
+            pass
+
+    # CSV Export
     if "export" in request.GET:
         response = HttpResponse(content_type="text/csv")
         response["Content-Disposition"] = 'attachment; filename="feedback_report.csv"'
-
         writer = csv.writer(response)
         writer.writerow([
-            "Service Request ID","Requestor Name","Requestor Email",
+            "Service Request ID",
+            "Unit",
+            "Requestor Name",
+            "Requestor Email",
             "SQD1","SQD2","SQD3","SQD4","SQD5","SQD6","SQD7","SQD8","SQD9",
             "CC1","CC2","CC3",
-            "Average Score","Suggestions","Date Submitted"
+            "Average Score",
+            "Suggestions",
+            "Date Submitted"
         ])
-
         for fb in feedback_list:
             req = fb.request
+            requestor_name = req.custom_full_name or (req.requestor.get_full_name() if req.requestor else "")
+            requestor_email = req.custom_email or (req.requestor.email if req.requestor else "")
+            request_id = req.id
+            unit_name = req.unit.name if req.unit else ""
+            formatted_date = fb.date_submitted.strftime("%Y-%m-%d %H:%M") if fb.date_submitted else ""
             writer.writerow([
-                req.id if req else "",
-                req.custom_full_name or req.requestor.get_full_name() if req else "",
-                req.custom_email or req.requestor.email if req else "",
+                request_id,
+                unit_name,
+                requestor_name,
+                requestor_email,
                 fb.sqd1 or "", fb.sqd2 or "", fb.sqd3 or "", fb.sqd4 or "",
                 fb.sqd5 or "", fb.sqd6 or "", fb.sqd7 or "", fb.sqd8 or "", fb.sqd9 or "",
                 fb.cc1 or "", fb.cc2 or "", fb.cc3 or "",
                 round(fb.average_score, 2),
                 fb.suggestions or "",
-                fb.date_submitted.strftime("%Y-%m-%d %H:%M") if fb.date_submitted else "",
+                formatted_date
             ])
-
         return response
 
-    # --- Compute averages for table ---
+    # Compute average_rating for template display
     for fb in feedback_list:
         scores = [fb.sqd1, fb.sqd2, fb.sqd3, fb.sqd4, fb.sqd5, fb.sqd6, fb.sqd7, fb.sqd8, fb.sqd9]
         valid_scores = [s for s in scores if s is not None]
-        fb.average_rating = round(sum(valid_scores) / len(valid_scores), 2) if valid_scores else 0
+        fb.average_rating = round(sum(valid_scores)/len(valid_scores), 2) if valid_scores else 0
 
-    units = Unit.objects.all()
-
-    return render(request, "gso_office/feedbacks/feedback_reports.html", {
-        "feedback_list": feedback_list,
-        "units": units,
-    })
-
-
-
+    return render(
+        request,
+        "gso_office/feedbacks/feedback_reports.html",
+        {
+            "feedback_list": feedback_list,
+            "units": units,
+            "selected_unit": unit_id,
+            "selected_month": month,
+            "start_date": start_date,
+            "end_date": end_date
+        }
+    )
 
 
 
