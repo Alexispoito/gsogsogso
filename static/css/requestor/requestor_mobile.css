@@ -1,0 +1,49 @@
+/* Mobile Header */
+.gso-header {
+  background: var(--gso-blue);
+  height: 60px;
+  padding: 0 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: white;
+}
+
+.burger-btn {
+  font-size: 1.8rem;
+  border: none;
+  background: transparent;
+  color: white;
+}
+
+/* Sidebar Mobile */
+@media (max-width: 992px) {
+  .sidebar {
+    position: fixed;
+    left: -260px;
+    top: 60px;
+    height: calc(100% - 60px);
+    transition: left .3s;
+    z-index: 1000;
+  }
+
+  .sidebar.open {
+    left: 0;
+  }
+}
+
+.fab {
+  position: fixed;
+  bottom: 25px;
+  right: 25px;
+  background: var(--gso-blue);
+  color: white;
+  width: 55px;
+  height: 55px;
+  border-radius: 50%;
+  font-size: 1.7rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.25);
+}
