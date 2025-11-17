@@ -7,9 +7,11 @@
 <div class="container mt-4">
   <div class="d-flex justify-content-between align-items-center mb-3">
     <h4>📋 Client Satisfaction Feedbacks</h4>
-    <a href="?export=true" class="btn btn-success">
+
+    <!-- 🔽 TRIGGER MODAL INSTEAD OF DIRECT DOWNLOAD -->
+    <button class="btn btn-success" data-bs-toggle="modal" data-bs-target="#exportModal">
       <i class="bi bi-download"></i> Download CSV
-    </a>
+    </button>
   </div>
 
   <div class="table-responsive">
@@ -31,7 +33,6 @@
           <td>{{ forloop.counter }}</td>
           <td>{{ fb.request.id }}</td>
 
-          <!-- ✅ Requestor Name (prefers custom_full_name if available) -->
           <td>
             {% if fb.request.custom_full_name %}
               {{ fb.request.custom_full_name }}
@@ -42,7 +43,6 @@
             {% endif %}
           </td>
 
-          <!-- ✅ Requestor Email (prefers custom_email if available) -->
           <td>
             {% if fb.request.custom_email %}
               {{ fb.request.custom_email }}
@@ -53,13 +53,8 @@
             {% endif %}
           </td>
 
-          <!-- ✅ Average Rating -->
           <td>{{ fb.average_rating|default:"0.00" }}</td>
-
-          <!-- ✅ Suggestions -->
           <td>{{ fb.suggestions|default:"—" }}</td>
-
-          <!-- ✅ Date Submitted -->
           <td>{{ fb.date_submitted|date:"Y-m-d H:i" }}</td>
         </tr>
         {% empty %}
@@ -71,4 +66,52 @@
     </table>
   </div>
 </div>
+
+<!-- 🔽 EXPORT FILTER MODAL -->
+<div class="modal fade" id="exportModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+
+      <div class="modal-header">
+        <h5 class="modal-title">Download Feedback Report</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+
+      <form method="get" action="{% url 'feedback_reports' %}">
+        <div class="modal-body">
+
+          <!-- MONTH SELECT -->
+          <div class="mb-3">
+            <label class="form-label">Select Month</label>
+            <select name="month" class="form-select" required>
+              <option value="">-- Select Month --</option>
+              {% for m in "1,2,3,4,5,6,7,8,9,10,11,12".split(",") %}
+                <option value="{{ m }}">{{ m }}</option>
+              {% endfor %}
+            </select>
+          </div>
+
+          <!-- UNIT SELECT -->
+          <div class="mb-3">
+            <label class="form-label">Select Unit</label>
+            <select name="unit" class="form-select" required>
+              <option value="">-- Select Unit --</option>
+              {% for u in units %}
+                <option value="{{ u.id }}">{{ u.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+
+        </div>
+
+        <div class="modal-footer">
+          <input type="hidden" name="export" value="1">
+          <button type="submit" class="btn btn-success">Download</button>
+        </div>
+      </form>
+
+    </div>
+  </div>
+</div>
+
 {% endblock %}

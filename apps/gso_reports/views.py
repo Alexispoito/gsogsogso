@@ -11,6 +11,10 @@ from django.db.models import Q
 from django.shortcuts import render
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.views.decorators.csrf import csrf_exempt
+from openpyxl import load_workbook
+from openpyxl.styles import Alignment
+from openpyxl.utils import range_boundaries
+
 
 from apps.gso_requests.models import ServiceRequest, Feedback
 from apps.gso_accounts.models import User, Unit
@@ -137,6 +141,7 @@ def update_success_indicator(request):
         except Exception as e:
             return JsonResponse({"success": False, "error": str(e)})
     return JsonResponse({"success": False, "error": "Invalid request"})
+
 # -------------------------------
 # Generate IPMT Excel
 # -------------------------------
@@ -354,7 +359,7 @@ def preview_ipmt(request):
         "personnel_names": personnel_names,
     }
 
-    return render(request, "gso_office/ipmt/ipmt_preview.html", context)
+    return render(request, "gso_office/reports/ipmt_preview.html", context)
 
 
 
@@ -469,73 +474,64 @@ def update_war_success_indicator(request, war_id):
 
 
 
-
 @login_required
 @user_passes_test(is_gso_or_director)
 def feedback_reports(request):
-    """Show and export all feedback records (using requestor info only)."""
-    feedback_list = Feedback.objects.select_related("request", "request__requestor").order_by("-date_submitted")
+    """Show and export all feedback records."""
+    feedback_list = Feedback.objects.select_related(
+        "request", "request__requestor", "request__unit"
+    ).order_by("-date_submitted")
 
-    # ✅ Export to CSV
+    # --- FILTERING ---
+    month = request.GET.get("month")
+    unit = request.GET.get("unit")
+
+    if month:
+        feedback_list = feedback_list.filter(date_submitted__month=month)
+    if unit:
+        feedback_list = feedback_list.filter(request__unit_id=unit)
+
+    # --- EXPORT CSV ---
     if "export" in request.GET:
         response = HttpResponse(content_type="text/csv")
         response["Content-Disposition"] = 'attachment; filename="feedback_report.csv"'
 
         writer = csv.writer(response)
         writer.writerow([
-            "Service Request ID",
-            "Requestor Name",
-            "Requestor Email",
-            "SQD1", "SQD2", "SQD3", "SQD4", "SQD5", "SQD6", "SQD7", "SQD8", "SQD9",
-            "CC1", "CC2", "CC3",
-            "Average Score",
-            "Suggestions",
-            "Date Submitted"
+            "Service Request ID","Requestor Name","Requestor Email",
+            "SQD1","SQD2","SQD3","SQD4","SQD5","SQD6","SQD7","SQD8","SQD9",
+            "CC1","CC2","CC3",
+            "Average Score","Suggestions","Date Submitted"
         ])
 
         for fb in feedback_list:
             req = fb.request
-
-            # ✅ Get requestor info (custom > user)
-            if req:
-                requestor_name = req.custom_full_name or (req.requestor.get_full_name() if req.requestor else "")
-                requestor_email = req.custom_email or (req.requestor.email if req.requestor else "")
-                request_id = req.id
-            else:
-                requestor_name = ""
-                requestor_email = ""
-                request_id = ""
-
-            # ✅ Format date properly
-            formatted_date = fb.date_submitted.strftime("%Y-%m-%d %H:%M") if fb.date_submitted else ""
-
             writer.writerow([
-                request_id,
-                requestor_name,
-                requestor_email,
+                req.id if req else "",
+                req.custom_full_name or req.requestor.get_full_name() if req else "",
+                req.custom_email or req.requestor.email if req else "",
                 fb.sqd1 or "", fb.sqd2 or "", fb.sqd3 or "", fb.sqd4 or "",
                 fb.sqd5 or "", fb.sqd6 or "", fb.sqd7 or "", fb.sqd8 or "", fb.sqd9 or "",
                 fb.cc1 or "", fb.cc2 or "", fb.cc3 or "",
                 round(fb.average_score, 2),
                 fb.suggestions or "",
-                formatted_date
+                fb.date_submitted.strftime("%Y-%m-%d %H:%M") if fb.date_submitted else "",
             ])
 
         return response
 
-    # ✅ Compute average for HTML table view
+    # --- Compute averages for table ---
     for fb in feedback_list:
         scores = [fb.sqd1, fb.sqd2, fb.sqd3, fb.sqd4, fb.sqd5, fb.sqd6, fb.sqd7, fb.sqd8, fb.sqd9]
         valid_scores = [s for s in scores if s is not None]
         fb.average_rating = round(sum(valid_scores) / len(valid_scores), 2) if valid_scores else 0
 
-    return render(
-        request,
-        "gso_office/feedbacks/feedback_reports.html",
-        {"feedback_list": feedback_list}
-    )
+    units = Unit.objects.all()
 
-
+    return render(request, "gso_office/feedbacks/feedback_reports.html", {
+        "feedback_list": feedback_list,
+        "units": units,
+    })
 
 
 
@@ -578,5 +574,251 @@ def gso_analytics(request):
     }
 
     return render(request, 'gso_office/analytics/gso_analytics.html', context)
+
+
+
+
+
+# -------------------------------
+# Preview Report (IPMT or WAR)
+# -------------------------------
+@login_required
+@user_passes_test(is_gso_or_director)
+def preview_report(request):
+    """
+    Unified preview for IPMT or Work Accomplishment Report (WAR) before export.
+    Uses the same filters as the modal: unit, month, personnel.
+    """
+    report_type = request.GET.get("report_type", "ipmt").lower()
+    month_filter = request.GET.get("month")
+    unit_filter = request.GET.get("unit")
+    personnel_names = request.GET.getlist("personnel[]") or []
+
+    if report_type not in ["ipmt", "war"]:
+        return HttpResponse("Invalid report type.", status=400)
+
+    # For IPMT, reuse existing preview_ipmt logic
+    if report_type == "ipmt":
+        # Call your existing IPMT preview logic
+        return preview_ipmt(request)
+
+    # For WAR preview
+    if report_type == "war":
+        # Parse month
+        year = month_num = None
+        if month_filter and "-" in month_filter:
+            try:
+                year, month_num = map(int, month_filter.split("-"))
+            except ValueError:
+                return HttpResponse("Invalid month format. Use YYYY-MM.", status=400)
+
+        unit = Unit.objects.filter(name__iexact=unit_filter).first() if unit_filter else None
+
+        # Fetch WARs filtered by unit, month, personnel
+        wars = WorkAccomplishmentReport.objects.select_related("unit").prefetch_related("assigned_personnel").all()
+
+        if unit:
+            wars = wars.filter(unit=unit)
+        if year and month_num:
+            wars = wars.filter(date_started__year=year, date_started__month=month_num)
+        if personnel_names:
+            user_objs = [get_user_by_identifier(name) for name in personnel_names]
+            user_objs = [u for u in user_objs if u]
+            if user_objs:
+                wars = wars.filter(assigned_personnel__in=user_objs).distinct()
+
+        # Normalize reports
+        reports = []
+        for war in wars.order_by("-date_started"):
+            reports.append({
+                "id": war.id,
+                "type": "WorkAccomplishmentReport",
+                "date": war.date_started,
+                "unit": war.unit.name if war.unit else "Unassigned",
+                "description": war.description or "",
+                "requesting_office": getattr(war, "requesting_office", ""),
+                "personnel": [p.get_full_name() for p in war.assigned_personnel.all()],
+                "status": war.status,
+                "rating": getattr(war, "rating", "Not Rated"),
+                "success_indicator": war.success_indicator or None,
+                "request": getattr(war, "request", None),
+            })
+
+        context = {
+            "reports": reports,
+            "month_filter": month_filter,
+            "unit_filter": unit_filter,
+            "personnel_names": personnel_names,
+        }
+
+        return render(request, "gso_office/reports/war_preview.html", context)
+    
+
+
+@login_required
+@user_passes_test(is_gso_or_director)
+def save_war(request):
+    """
+    Save edited WAR descriptions from preview.
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=400)
+    try:
+        data = json.loads(request.body)
+        rows = data.get("rows", [])
+    except Exception as e:
+        return JsonResponse({"error": f"Invalid JSON: {str(e)}"}, status=400)
+
+    for row in rows:
+        war_id = row.get("war_id")
+        description = row.get("description", "")
+        war = WorkAccomplishmentReport.objects.filter(id=war_id).first()
+        if war:
+            war.description = description
+            war.save()
+
+    return JsonResponse({"status": "success"})
+
+@login_required
+@user_passes_test(is_gso_or_director)
+def generate_war(request):
+    import calendar, os, json
+    from openpyxl import load_workbook
+    from openpyxl.styles import Alignment
+    from django.http import HttpResponse, JsonResponse
+
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=400)
+
+    try:
+        data = json.loads(request.body)
+        month_filter = data.get("month")
+        unit_name = data.get("unit")
+        report_ids = data.get("report_ids", [])
+    except Exception as e:
+        return JsonResponse({"error": f"Invalid request data: {str(e)}"}, status=400)
+
+    if not month_filter:
+        return JsonResponse({"error": "Month filter required"}, status=400)
+
+    # Parse month filter
+    try:
+        year, month_num = map(int, month_filter.split("-"))
+    except Exception:
+        return JsonResponse({"error": "Invalid month format. Use YYYY-MM"}, status=400)
+
+    month_range = f"{calendar.month_name[month_num]} 1 - {calendar.month_name[month_num]} {calendar.monthrange(year, month_num)[1]}"
+    unit = Unit.objects.filter(name__iexact=unit_name).first() if unit_name else None
+
+    # Fetch WARs
+    wars = WorkAccomplishmentReport.objects.select_related("unit").prefetch_related("assigned_personnel").filter(
+        date_started__year=year,
+        date_started__month=month_num
+    )
+    if unit:
+        wars = wars.filter(unit=unit)
+    if report_ids:
+        wars = wars.filter(id__in=report_ids)
+    wars = wars.order_by("date_started")
+
+    # Load template
+    template_path = os.path.join(settings.BASE_DIR, "static", "excel_file", "samplewar.xlsx")
+    wb = load_workbook(template_path)
+    ws = wb.active
+
+    # Merge and write month/unit headers
+    ws.merge_cells("A7:H7")
+    ws.cell(row=7, column=1, value=month_range).alignment = Alignment(horizontal="center", vertical="center")
+
+    ws.merge_cells("A9:H9")
+    ws.cell(row=9, column=1, value=unit.name.upper() if unit else "UNASSIGNED").alignment = Alignment(horizontal="center", vertical="center")
+
+    start_row = 11
+
+    # Helper: adjust row height dynamically
+    from openpyxl.utils import get_column_letter
+    def adjust_row_height(row, columns):
+        max_lines = 1
+        for col in columns:
+            cell = ws.cell(row=row, column=col)
+            if cell.value:
+                col_width = ws.column_dimensions[get_column_letter(col)].width or 10
+                lines = len(str(cell.value)) / col_width
+                max_lines = max(max_lines, int(lines) + 1)
+        ws.row_dimensions[row].height = max(15, max_lines * 15)
+
+    # Write WAR rows
+    for i, war in enumerate(wars, start=start_row):
+        ws.cell(row=i, column=1).value = war.date_started.strftime("%Y-%m-%d") if war.date_started else ""
+        ws.cell(row=i, column=2).value = getattr(war, "date_completed", None).strftime("%Y-%m-%d") if getattr(war, "date_completed", None) else ""
+        ws.cell(row=i, column=3).value = getattr(war, "project_name", "")
+        ws.cell(row=i, column=4).value = getattr(war, "description", "")
+        ws.cell(row=i, column=5).value = getattr(war, "requesting_office", "")
+        ws.cell(row=i, column=6).value = ", ".join([p.get_full_name() for p in war.assigned_personnel.all()])
+        ws.cell(row=i, column=7).value = getattr(war, "status", "")
+        ws.cell(row=i, column=8).value = getattr(war, "rating", "")
+
+        # Wrap text for Project Name and Description, center vertically and horizontally
+        for col in [3, 4]:
+            ws.cell(row=i, column=col).alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
+
+        # Center all other columns
+        for col in [1,2,5,6,7,8]:
+            ws.cell(row=i, column=col).alignment = Alignment(vertical="center", horizontal="center")
+
+        # Adjust row height only based on Project Name and Description
+        adjust_row_height(i, [3,4])
+
+    # TOTAL row (optional, if you want to keep a total or leave blank)
+    total_row = start_row + len(wars)
+
+    # --- Footer: Prepared / Checked / Noted by ---
+    sign_row = total_row + 2
+    footer_rows = 3
+    unit_name_lower = unit_name.lower() if unit_name else ""
+
+    if "electrical" in unit_name_lower:
+        prepared_by_text = "Prepared by:\nPepito Nanalo\nAdministrative Assistant II"
+        checked_by_text = "Checked by:\nJuan Juanone\nOIC Head, Electrical Services Unit"
+    elif "utility" in unit_name_lower:
+        prepared_by_text = "Prepared by:\nLuz Bagani\nAdministrative Assistant II"
+        checked_by_text = "Checked by:\nManny Santos\nOIC Head, Utility Unit"
+    elif "repair" in unit_name_lower or "maintenance" in unit_name_lower:
+        prepared_by_text = "Prepared by:\nRepair/Maintenance Person\nPosition"
+        checked_by_text = "Checked by:\nRepair/Maintenance Head\nPosition"
+    elif "motorpool" in unit_name_lower:
+        prepared_by_text = "Prepared by:\nMotorpool Person\nPosition"
+        checked_by_text = "Checked by:\nMotorpool Head\nPosition"
+    else:
+        prepared_by_text = "Prepared by:\nPrepared Person\nPosition"
+        checked_by_text = "Checked by:\nChecked Person\nPosition"
+
+    noted_by_text = "Noted by:\nENGR. Juan Tamad\nGSO Director"
+
+    # Merge cells for 3-row footer
+    ws.merge_cells(start_row=sign_row, start_column=1, end_row=sign_row+footer_rows-1, end_column=3)
+    ws.merge_cells(start_row=sign_row, start_column=4, end_row=sign_row+footer_rows-1, end_column=6)
+    ws.merge_cells(start_row=sign_row, start_column=7, end_row=sign_row+footer_rows-1, end_column=8)
+
+    ws.cell(row=sign_row, column=1, value=prepared_by_text)
+    ws.cell(row=sign_row, column=4, value=checked_by_text)
+    ws.cell(row=sign_row, column=7, value=noted_by_text)
+
+    # Wrap text and center vertically & horizontally
+    for col in [1,4,7]:
+        cell = ws.cell(row=sign_row, column=col)
+        cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
+
+    # Adjust row heights for footer
+    for r in range(sign_row, sign_row + footer_rows):
+        ws.row_dimensions[r].height = 20
+
+    # Return Excel
+    response = HttpResponse(content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    filename = f"WAR_{unit_name}_{month_filter}.xlsx"
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    wb.save(response)
+    return response
+
 
 
