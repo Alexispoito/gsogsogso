@@ -426,8 +426,19 @@ def preview_ipmt(request):
             else:
                 # First-time AI generation
                 if war_ids:
-                    summary_dict = generate_ipmt_summary_sync(war_ids)
-                    summary_text = summary_dict.get(indicator.code, "")
+                    if len(war_ids) == 1:
+                        # Get the single WAR directly — NO AI summarization
+                        single_war = WorkAccomplishmentReport.objects.get(id=war_ids[0])
+                        summary_text = (
+                            getattr(single_war, "work_done", None)
+                            or getattr(single_war, "description", None)
+                            or ""
+                        )
+
+                    else:
+                        # AI summarization for multiple WARs
+                        summary_dict = generate_ipmt_summary_sync(war_ids)
+                        summary_text = summary_dict.get(indicator.code, "")
                 else:
                     summary_text = ""
 
